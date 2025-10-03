@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>네이버 블로그 상위노출 키워드 도우미 — 안정화 최종</title>
+  <style>
+    body { font-family: Arial, "Noto Sans KR", sans-serif; margin: 20px; display:flex; gap:16px; }
+    .left { flex: 1 1 68%; min-width: 600px; }
+    .right { flex: 1 1 32%; min-width: 320px; border:1px solid #ddd; padding:12px; border-radius:6px; height: calc(100vh - 60px); overflow:auto;}
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    input, button, select { padding: 8px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { padding: 8px; border: 1px solid #ddd; font-size: 14px; }
+    th { background: #f5f5f5; user-select: none; }
+    th.sortable { cursor: pointer; }
+    .tabs { display: flex; gap: 8px; margin-top: 12px; }
+    .tab { padding: 8px 12px; border: 1px solid #ddd; cursor: pointer; }
+    .tab.active { background: #222; color: #fff; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .legend { font-size: 12px; color: #666; margin-left: 8px; }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 14px; background: #eef2ff; margin: 4px 6px 0 0; }
+    .hint { color:#666; font-size:12px; margin: 6px 0; }
+    .badge { display:inline-block; padding:2px 6px; font-size:12px; border-radius:10px; background:#e6fcf5; color:#096; margin-left:6px; }
+    .row-actions a, .row-actions button { margin-right:6px; font-size:12px; }
+    .side-title { font-weight:700; margin:6px 0; }
+    .mini { font-size:12px; color:#666; }
+    .spark { height:40px; display:flex; gap:2px; align-items:flex-end; }
+    .spark div { width:3px; background:#8ecae6; }
+    .card { border:1px solid #eee; padding:8px; border-radius:6px; margin-bottom:8px; }
+    .err { color:#b00020; font-size:12px; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="left">
+    <h2>네이버 블로그 상위노출 키워드 도우미 — 안정화 최종</h2>
+
+    <div class="controls">
+      <input type="text" id="keyword-input" placeholder="메인 키워드 예: 건강" />
+      <input type="number" id="min-search" placeholder="최소 월간검색량" value="500" />
+      <input type="number" id="max-count" placeholder="최대 키워드 개수" value="200" />
+      <select id="strategy">
+        <option value="easy">쉬운 공략(경쟁↓ 우선)</option>
+        <option value="balanced">균형 공략(검색량/경쟁 균형)</option>
+        <option value="volume">볼륨 공략(검색량↑ 우선)</option>
+      </select>
+      <button id="btn-search">분석 시작</button>
+      <button id="btn-download">CSV 다운로드</button>
+      <button id="btn-export-picked">선택 키워드 내보내기</button>
+      <span class="legend">경쟁정도 색상: 낮음=초록, 중간=주황, 높음=빨강</span>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-target="#panel-main">추천 키워드</div>
+      <div class="tab" data-target="#panel-related">연관/롱테일</div>
+    </div>
+
+    <div id="panel-main" class="panel active">
+      <div class="hint">키워드 도구(API) + 블로그 검색 + 데이터랩 트렌드로 글감 선별을 한 화면에서 진행합니다[공식 문서 준수].</div>
+      <table>
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="pick-all" /></th>
+            <th class="sortable" data-key="relKeyword">키워드</th>
+            <th class="sortable" data-key="totalQc">월간검색 합계</th>
+            <th class="sortable" data-key="monthlyPcQcCnt">PC 검색</th>
+            <th class="sortable" data-key="monthlyMobileQcCnt">모바일 검색</th>
+            <th class="sortable" data-key="compIdxNorm">경쟁정도</th>
+            <th class="sortable" data-key="totalClk">월평균 클릭 합계</th>
+            <th>도구</th>
+          </tr>
+        </thead>
+        <tbody id="results"></tbody>
+      </table>
+    </div>
+
+    <div id="panel-related" class="panel">
+      <h3>연관/롱테일 키워드</h3>
+      <div id="related-container">검색 후 여기에 표시됩니다.</div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="side-title">키워드 인사이트</div>
+    <div id="side-content" class="mini">좌측 표에서 “블로그 상위 / 트렌드”를 누르면 이 영역에 표시됩니다.</div>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:3000";
+    let rawList = [];
+    let viewList = [];
+    let sortState = { key: "scoreEasy", desc: true };
+
+    const N = (v) => Number.isFinite(parseFloat(v)) ? parseFloat(v) : 0;
+
+    function compValue(v) {
+      if (v == null) return 0;
+      const s = String(v).trim();
+      if (s === "높음") return 9;
+      if (s === "중간") return 5;
+      if (s === "낮음") return 1;
+      const n = parseFloat(s);
+      return Number.isFinite(n) ? n : 0;
+    }
+    function compColorSafe(v) {
+      const n = compValue(v);
+      if (n >= 7) return "#ff6b6b";
+      if (n >= 3) return "#ffa94d";
+      return "#51cf66";
+    }
+
+    function scoreItems(items, strategy) {
+      items.forEach(it => {
+        it.totalQc = N(it.monthlyPcQcCnt) + N(it.monthlyMobileQcCnt);
+        it.totalClk = N(it.monthlyAvePcClkCnt) + N(it.monthlyAveMobileClkCnt);
+        it.compIdxNorm = compValue(it.compIdx);
+        it.scoreEasy = it.totalQc / (1 + it.compIdxNorm);
+        it.scoreBalanced = (it.totalQc * 0.7) + ((10 - it.compIdxNorm) * 0.3 * 100);
+        it.scoreVolume = (it.totalQc * 0.9) + (it.totalClk * 0.1 * 10);
+      });
+      if (strategy === "easy") sortState = { key: "scoreEasy", desc: true };
+      else if (strategy === "balanced") sortState = { key: "scoreBalanced", desc: true };
+      else sortState = { key: "scoreVolume", desc: true };
+    }
+
+    function easyBadge(it) {
+      const minSearch = parseInt(document.getElementById("min-search").value, 10) || 0;
+      return it.compIdxNorm <= 3 && it.totalQc >= minSearch * 1.2;
+    }
+
+    function renderTable(list, { minSearch, maxCount }) {
+      let filtered = list.filter(it => it.totalQc >= minSearch);
+      filtered.sort((a, b) => {
+        const av = (typeof a[sortState.key] === "string") ? a[sortState.key].toLowerCase() : N(a[sortState.key]);
+        const bv = (typeof b[sortState.key] === "string") ? b[sortState.key].toLowerCase() : N(b[sortState.key]);
+        if (av < bv) return sortState.desc ? 1 : -1;
+        if (av > bv) return sortState.desc ? -1 : 1;
+        if (a.compIdxNorm !== b.compIdxNorm) return a.compIdxNorm - b.compIdxNorm;
+        return b.totalQc - a.totalQc;
+      });
+      filtered = filtered.slice(0, maxCount);
+      viewList = filtered;
+
+      const tbody = document.getElementById("results");
+      tbody.innerHTML = "";
+      filtered.forEach((it, idx) => {
+        const badge = easyBadge(it) ? '<span class="badge">쉬움</span>' : "";
+        const bg = compColorSafe(it.compIdx);
+        const kwEnc = encodeURIComponent(it.relKeyword);
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td><input type="checkbox" class="pick" data-i="${idx}" /></td>
+          <td>${it.relKeyword} ${badge}</td>
+          <td>${it.totalQc}</td>
+          <td>${N(it.monthlyPcQcCnt)}</td>
+          <td>${N(it.monthlyMobileQcCnt)}</td>
+          <td style="background:${bg}; color:#000; font-weight:600; text-align:center;">${it.compIdx ?? "-"}</td>
+          <td>${it.totalClk}</td>
+          <td class="row-actions">
+            <button data-kw="${kwEnc}" class="btn-blog">블로그 상위</button>
+            <button data-kw="${kwEnc}" class="btn-trend">트렌드</button>
+            <a href="https://search.naver.com/search.naver?where=view&sm=tab_jum&query=${kwEnc}" target="_blank" rel="noopener">VIEW</a>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      document.getElementById("pick-all").checked = false;
+      document.getElementById("pick-all").onchange = () => {
+        document.querySelectorAll(".pick").forEach(cb => cb.checked = document.getElementById("pick-all").checked);
+      };
+
+      document.querySelectorAll(".btn-blog").forEach(btn => btn.onclick = () => loadBlogTop(decodeURIComponent(btn.dataset.kw)));
+      document.querySelectorAll(".btn-trend").forEach(btn => btn.onclick = () => loadTrend(decodeURIComponent(btn.dataset.kw)));
+    }
+
+    function attachHeaderSorting() {
+      document.querySelectorAll("thead th.sortable").forEach(th => {
+        th.addEventListener("click", () => {
+          const key = th.getAttribute("data-key");
+          if (sortState.key === key) sortState.desc = !sortState.desc;
+          else { sortState.key = key; sortState.desc = key === "relKeyword" ? false : true; }
+          reRenderOnly();
+        });
+      });
+    }
+
+    // 탭 전환(누락 복구)
+    function attachTabs() {
+      document.querySelectorAll(".tab").forEach(tab => {
+        tab.addEventListener("click", () => {
+          document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+          document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+          tab.classList.add("active");
+          document.querySelector(tab.getAttribute("data-target")).classList.add("active");
+        });
+      });
+    }
+
+    // 입력/전략 변경 시 즉시 반영
+    function attachLiveControls() {
+      const liveRecalc = () => {
+        if (!rawList.length) return;
+        const strategy = document.getElementById("strategy").value;
+        scoreItems(rawList, strategy);
+        reRenderOnly();
+      };
+      ["change"].forEach(ev => document.getElementById("strategy").addEventListener(ev, liveRecalc));
+      ["input","change"].forEach(ev => document.getElementById("min-search").addEventListener(ev, reRenderOnly));
+      ["input","change"].forEach(ev => document.getElementById("max-count").addEventListener(ev, reRenderOnly));
+    }
+
+    function reRenderOnly() {
+      const minSearch = parseInt(document.getElementById("min-search").value, 10) || 0;
+      const maxCount = parseInt(document.getElementById("max-count").value, 10) || 200;
+      renderTable(rawList, { minSearch, maxCount });
+    }
+
+    function toCSV(rows) {
+      const header = ["키워드","월간검색 합계","PC 검색","모바일 검색","경쟁정도","월평균 클릭 합계"];
+      const esc = (s) => {
+        const t = String(s ?? "");
+        return (t.includes('"') || t.includes(",") || t.includes("\n")) ? '"' + t.replace(/"/g, '""') + '"' : t;
+      };
+      const lines = [header.join(",")];
+      for (const it of rows) lines.push([esc(it.relKeyword), esc(it.totalQc), esc(N(it.monthlyPcQcCnt)), esc(N(it.monthlyMobileQcCnt)), esc(it.compIdx ?? "-"), esc(it.totalClk)].join(","));
+      return lines.join("\n");
+    }
+
+    document.getElementById("btn-download").addEventListener("click", () => {
+      if (!viewList.length) { alert("다운로드할 데이터가 없습니다."); return; }
+      const csv = toCSV(viewList);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const kw = document.getElementById("keyword-input").value.trim() || "keywords";
+      a.href = url; a.download = `naver_blog_keywords_${kw}.csv`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+
+    document.getElementById("btn-export-picked").addEventListener("click", () => {
+      const picked = [];
+      document.querySelectorAll(".pick:checked").forEach(cb => {
+        const i = parseInt(cb.getAttribute("data-i"), 10);
+        const it = viewList[i];
+        if (it) picked.push(it);
+      });
+      if (!picked.length) { alert("선택된 키워드가 없습니다."); return; }
+      const csv = toCSV(picked);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `picked_keywords.csv`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+
+    async function fetchKeywordList(hint) {
+      const r = await fetch(`${API_BASE}/api/keywordstool?hint=${encodeURIComponent(hint)}&showDetail=1`);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      return Array.isArray(data.keywordList) ? data.keywordList : [];
+    }
+
+    // 안전 파서: JSON 시도 → 실패 시 TEXT 반환
+    async function safeJSON(r) {
+      const text = await r.text();
+      try { return { ok:true, data: JSON.parse(text) }; }
+      catch { return { ok:false, text }; }
+    }
+
+    function setSide(html) {
+      document.getElementById("side-content").innerHTML = html;
+    }
+
+    async function loadBlogTop(keyword) {
+      setSide(`<div class="side-title">블로그 상위 — ${keyword}</div><div class="mini">불러오는 중...</div>`);
+      try {
+        const r = await fetch(`${API_BASE}/api/open/blog?query=${encodeURIComponent(keyword)}&display=10&start=1`);
+        const parsed = await safeJSON(r);
+        if (!parsed.ok) throw new Error(parsed.text || "응답 파싱 실패");
+        const items = Array.isArray(parsed.data.items) ? parsed.data.items : [];
+        const cards = items.map(it => `
+          <div class="card">
+            <div><a href="${it.link}" target="_blank" rel="noopener">${it.title}</a></div>
+            <div class="mini">${it.bloggername || ""} | ${it.postdate || ""}</div>
+            <div class="mini">${it.description || ""}</div>
+          </div>
+        `).join("");
+        setSide(`<div class="side-title">블로그 상위 — ${keyword}</div>${cards || "<div class='mini'>결과 없음</div>"}`);
+      } catch (e) {
+        setSide(`<div class="err">블로그 상위 로딩 오류: ${e.message}</div>`);
+      }
+    }
+
+    function renderSparkline(series) {
+      const max = Math.max(...series, 1);
+      const bars = series.map(v => `<div style="height:${(v/max)*40}px;"></div>`).join("");
+      return `<div class="spark">${bars}</div>`;
+    }
+
+    async function loadTrend(keyword) {
+      setSide(`<div class="side-title">데이터랩 트렌드 — ${keyword}</div><div class="mini">불러오는 중...</div>`);
+      try {
+        const today = new Date();
+        const end = today.toISOString().slice(0,10);
+        const startDateObj = new Date(today); startDateObj.setMonth(today.getMonth()-2);
+        const start = startDateObj.toISOString().slice(0,10);
+        const body = {
+          startDate: start,
+          endDate: end,
+          timeUnit: "date",
+          keywordGroups: [{ groupName: keyword, keywords: [keyword] }],
+          device: "",
+          ages: [],
+          gender: ""
+        };
+        const r = await fetch(`${API_BASE}/api/open/datalab`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        const parsed = await safeJSON(r);
+        if (!parsed.ok) throw new Error(parsed.text || "응답 파싱 실패");
+        const points = (parsed.data.results && parsed.data.results[0] && parsed.data.results[0].data) ? parsed.data.results[0].data : [];
+        const ratios = points.map(p => p.ratio || 0);
+        const html = `
+          <div class="side-title">데이터랩 트렌드 — ${keyword}</div>
+          <div class="mini">${start} ~ ${end} (상대지수 0–100)</div>
+          ${ratios.length ? renderSparkline(ratios) : "<div class='mini'>결과 없음</div>"}
+        `;
+        setSide(html);
+      } catch (e) {
+        setSide(`<div class="err">트렌드 로딩 오류: ${e.message}</div>`);
+      }
+    }
+
+    async function onSearch() {
+      const keyword = document.getElementById("keyword-input").value.trim();
+      const minSearch = parseInt(document.getElementById("min-search").value, 10) || 0;
+      const maxCount = parseInt(document.getElementById("max-count").value, 10) || 200;
+      const strategy = document.getElementById("strategy").value;
+      if (!keyword) { alert("키워드를 입력하세요."); return; }
+      try {
+        const list = await fetchKeywordList(keyword);
+        rawList = list.slice();
+        scoreItems(rawList, strategy);
+        renderTable(rawList, { minSearch, maxCount });
+        // 연관/롱테일은 탭에서 즉시 열 수 있도록 미리 준비
+        buildRelated(keyword);
+      } catch (e) {
+        alert("API 호출 오류: " + e.message);
+      }
+    }
+
+    // 이벤트 바인딩
+    document.getElementById("btn-search").addEventListener("click", onSearch);
+    document.getElementById("btn-download").addEventListener("click", () => {/* 위에 정의됨 */});
+    document.getElementById("btn-export-picked").addEventListener("click", () => {/* 위에 정의됨 */});
+    attachHeaderSorting();
+    attachTabs();
+    attachLiveControls();
+
+    // 연관/롱테일 작성 함수
+    async function buildRelated(hint) {
+      const el = document.getElementById("related-container");
+      el.textContent = "불러오는 중...";
+      try {
+        const list = await fetchKeywordList(hint);
+        const related = [], longtails = [];
+        for (const it of list) {
+          const kw = String(it.relKeyword || "").trim();
+          if (!kw) continue;
+          const words = kw.split(/\s+/).filter(Boolean);
+          if (words.length >= 2 && words.length <= 4) longtails.push(kw);
+          else related.push(kw);
+          if (related.length >= 150 && longtails.length >= 150) break;
+        }
+        const mk = (arr) => arr.slice(0, 150).map(k => `<span class="pill">${k}</span>`).join("");
+        el.innerHTML = `<div style="margin-bottom:8px;"><b>연관 키워드</b></div><div>${mk(related) || "없음"}</div><div style="margin:12px 0 8px;"><b>롱테일 키워드(2~4어절)</b></div><div>${mk(longtails) || "없음"}</div>`;
+      } catch (e) {
+        el.innerHTML = `<div class="err">연관/롱테일 로딩 오류: ${e.message}</div>`;
+      }
+    }
+  </script>
+</body>
+</html>
